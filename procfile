@@ -1,0 +1,162 @@
+LabPatologia/
+├── app.py
+├── requirements.txt
+├── templates/
+│   ├── base.html
+│   ├── home.html
+│   ├── new_sample.html
+│   ├── macroscopy.html
+│   ├── block_map.html
+│   └── report.html
+├── static/
+│   ├── css/
+│   │   └── style.css
+│   ├── js/
+│   │   └── webcam.js
+│   └── photos/        ← fotos capturadas
+├── database.db
+├── Procfile           ← para Render / Railway
+└── README.md
+from flask import Flask, render_template, request, redirect, url_for
+import sqlite3
+import os
+from datetime import date
+
+app = Flask(__name__)
+UPLOAD_FOLDER = "static/photos"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def get_db():
+    conn = sqlite3.connect("database.db")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+@app.route("/")
+def home():
+    return render_template("home.html")
+
+@app.route("/new_sample", methods=["GET","POST"])
+def new_sample():
+    db = get_db()
+    if request.method == "POST":
+        name = request.form["name"]
+        record = request.form["record"]
+        dob = request.form["dob"]
+        desc = request.form["material_desc"]
+        mtype = request.form["material_type"]
+        nip = request.form["nip"]
+        last = db.execute("SELECT MAX(id) FROM samples").fetchone()[0] or 0
+        bench = last + 1
+        db.execute("INSERT INTO samples (bench_number,name,patient_record,dob,material_desc,material_type,nip) VALUES (?,?,?,?,?,?,?)",
+                   (bench,name,record,dob,desc,mtype,nip))
+        db.commit()
+        return redirect(url_for("macroscopy", bench=bench))
+    return render_template("new_sample.html")
+
+@app.route("/macroscopy/<int:bench>", methods=["GET","POST"])
+def macroscopy(bench):
+    db = get_db()
+    sample = db.execute("SELECT * FROM samples WHERE bench_number=?", (bench,)).fetchone()
+    if request.method == "POST":
+        report = request.form["report"]
+        cassette = request.form["cassette"]
+        reserve = bool(request.form.get("reserve"))
+        tech = request.form["technician"]
+        photo_data = request.form["photo_data"]
+
+        filename = f"{bench}_{int(date.today().strftime('%Y%m%d%H%M%S'))}.png"
+        path = os.path.join(UPLOAD_FOLDER, filename)
+        with open(path, "wb") as f:
+            f.write(photo_data.encode("latin1"))
+
+        db.execute("INSERT INTO macroscopy (sample_id,macroscopic_report,cassette_count,reserve,photo_path,technician) VALUES (?,?,?,?,?,?)",
+                   (sample["id"],report,cassette,reserve,filename,tech))
+        db.commit()
+        return redirect(url_for("home"))
+    return render_template("macroscopy.html", sample=sample)
+
+@app.route("/block_map")
+def block_map():
+    db = get_db()
+    rows = db.execute("""
+        SELECT s.bench_number, m.cassette_count FROM samples s
+        JOIN macroscopy m ON s.id=m.sample_id
+    """).fetchall()
+
+    total = sum([r["cassette_count"] for r in rows])
+    return render_template("block_map.html", rows=rows, total=total)
+
+if __name__ == "__main__":
+    app.run(debug=True)
+CREATE TABLE samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bench_number INTEGER,
+    name TEXT,
+    patient_record TEXT,
+    dob TEXT,
+    material_desc TEXT,
+    material_type TEXT,
+    nip TEXT
+);
+
+CREATE TABLE macroscopy (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER,
+    macroscopic_report TEXT,
+    cassette_count INTEGER,
+    reserve BOOLEAN,
+    photo_path TEXT,
+    technician TEXT,
+    FOREIGN KEY(sample_id) REFERENCES samples(id)
+);
+sqlite3 database.db < schema.sql
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const photoInput = document.getElementById("photo_data");
+
+navigator.mediaDevices.getUserMedia({ video: true })
+  .then(stream => {
+    video.srcObject = stream;
+  });
+
+function capture() {
+  const context = canvas.getContext("2d");
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const dataURL = canvas.toDataURL("image/png");
+  photoInput.value = dataURL.replace("data:image/png;base64,", "");
+}
+<form method="POST">
+  <textarea name="report" placeholder="Laudo macroscópico" required></textarea>
+
+  <input type="number" name="cassette" required>
+
+  <label>Reserva</label>
+  <input type="checkbox" name="reserve">
+
+  <input type="text" name="technician" placeholder="Técnico">
+
+  <video id="video" width="320" height="240" autoplay></video>
+  <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+  <input type="hidden" id="photo_data" name="photo_data">
+
+  <button type="button" onclick="capture()">Capturar Foto</button>
+
+  <button type="submit">Salvar</button>
+</form>
+<script src="{{ url_for('static', filename='js/webcam.js') }}"></script>
+<style>
+@media print {
+  .no-print { display: none; }
+}
+</style>
+
+<h1>Mapa de Blocos</h1>
+<table>
+  <tr><th>Bancada</th><th># Blocos</th></tr>
+  {% for r in rows %}
+  <tr><td>{{ r.bench_number }}</td><td>{{ r.cassette_count }}</td></tr>
+  {% endfor %}
+</table>
+<p>Total: {{ total }}</p>
+
+<button class="no-print" onclick="window.print()">Imprimir</button>
